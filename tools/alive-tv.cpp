@@ -239,5 +239,5 @@ end:
   if (opt_alias_stats)
     IR::Memory::printAliasStats(*out);
 
-  return verifier.num_errors > 0;
+  return verifier.num_errors + verifier.num_unsound + verifier.num_failed > 0;
 }
