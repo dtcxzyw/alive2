@@ -84,7 +84,7 @@ optional<StateValue> exec(llvm::Function &F,
     return true;
   };
 
-  try {
+  {
     State state(*Func, true);
     sym_exec_init(state);
 
@@ -186,9 +186,6 @@ optional<StateValue> exec(llvm::Function &F,
       // move to the next instruction
       ++It;
     }
-  } catch (const AliveException &e) {
-    cout << "ERROR: " << e.msg << '\n';
-    return {};
   }
   UNREACHABLE();
 }

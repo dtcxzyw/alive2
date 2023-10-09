@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.8)
 include(ProcessorCount)
 
+set(CMAKE_FIND_PACKAGE_SORT_ORDER NATURAL)
+set(CMAKE_FIND_PACKAGE_SORT_DIRECTION DEC)
+
 project(Alive2)
 
 if (NOT CMAKE_BUILD_TYPE)
@@ -19,7 +22,7 @@ if (MSVC)
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/O2 /Oi /Zi ${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
   set(CMAKE_EXE_LINKER_FLAGS         "/LTCG:INCREMENTAL ${CMAKE_EXE_LINKER_FLAGS}")
 else()
-  set(CMAKE_CXX_FLAGS                "-Wall -Werror -fPIC -fstrict-enums ${CMAKE_CXX_FLAGS}")
+  set(CMAKE_CXX_FLAGS                "-Wall -fPIC -fstrict-enums ${CMAKE_CXX_FLAGS}")
   set(CMAKE_CXX_FLAGS_DEBUG          "-g -Og ${CMAKE_CXX_FLAGS_DEBUG}")
   set(CMAKE_CXX_FLAGS_RELEASE        "-O3 ${CMAKE_CXX_FLAGS_RELEASE}")
   set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELEASE} -g ${CMAKE_CXX_FLAGS_RELWITHDEBINFO}")
@@ -168,14 +171,6 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
   message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
   message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
 
-  if (NOT LLVM_ENABLE_RTTI)
-    message(FATAL_ERROR "LLVM must be built with '-DLLVM_ENABLE_RTTI=ON'")
-  endif()
-
-  if (NOT LLVM_ENABLE_EH)
-    message(FATAL_ERROR "LLVM must be built with '-DLLVM_ENABLE_EH=ON'")
-  endif()
-
   list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
   include(AddLLVM)
 
@@ -201,10 +196,6 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
 
   add_llvm_executable(quick-fuzz
     "tools/quick-fuzz.cpp"
-  )
-
-  add_llvm_executable(alive-exec
-    "tools/alive-exec.cpp"
   )
 
 else()
@@ -253,8 +244,7 @@ if (BUILD_LLVM_UTILS OR BUILD_TV)
 #  target_link_libraries(alive2 PRIVATE ${llvm_libs})
   target_link_libraries(alive-tv PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
   target_link_libraries(quick-fuzz PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
-  target_link_libraries(alive-exec PRIVATE ${ALIVE_LIBS_LLVM} ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES} ${llvm_libs})
-  install(TARGETS alive-tv quick-fuzz alive-exec)
+  install(TARGETS alive-tv quick-fuzz)
 endif()
 
 target_link_libraries(alive PRIVATE ${Z3_LIBRARIES} ${HIREDIS_LIBRARIES})
