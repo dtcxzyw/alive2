@@ -116,7 +116,7 @@ Results verify(llvm::Function &F1, llvm::Function &F2,
       };
 
       for (auto &BB : *F3)
-        for (auto &I : BB) {
+        for (auto &I : llvm::make_early_inc_range(BB)) {
           using namespace llvm::PatternMatch;
 
           if (llvm::isa<llvm::ZExtInst>(I)) {
@@ -150,14 +150,14 @@ Results verify(llvm::Function &F1, llvm::Function &F2,
               else
                 I.setIsExact(false);
             }
-          } else if (auto gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&I)) {
-            if (!gep->isInBounds()) {
-              gep->setIsInBounds(true);
-              if (verify())
-                changed = true;
-              else
-                gep->setIsInBounds(false);
-            }
+          // } else if (auto gep = llvm::dyn_cast<llvm::GetElementPtrInst>(&I)) {
+          //   if (!gep->isInBounds()) {
+          //     gep->setIsInBounds(true);
+          //     if (verify())
+          //       changed = true;
+          //     else
+          //       gep->setIsInBounds(false);
+          //   }
           } else if (auto *call = llvm::dyn_cast<llvm::CallInst>(&I)) {
             if (const auto *callee = call->getCalledFunction()) {
               switch (callee->getIntrinsicID()) {
@@ -178,6 +178,29 @@ Results verify(llvm::Function &F1, llvm::Function &F2,
               default:
                 break;
               }
+            }
+          } else if (llvm::isa<llvm::SelectInst>(&I) && I.getType()->isIntOrIntVectorTy(1)) {
+            auto replace_and_verify = [&](llvm::Instruction* inst) {
+              inst->insertBefore(&I);
+              I.replaceAllUsesWith(inst);
+              if (verify()) {
+                changed = true;
+                I.eraseFromParent();
+              } else {
+                inst->replaceAllUsesWith(&I);
+                inst->eraseFromParent();
+              }
+            };
+
+            using namespace llvm::PatternMatch;
+            llvm::Value *op0, *op1;
+            if (match(&I, m_LogicalAnd(m_Value(op0), m_Value(op1)))) {
+              auto *and_inst = llvm::BinaryOperator::CreateAnd(op0, op1);
+              replace_and_verify(and_inst);
+            }
+            else if (match(&I, m_LogicalOr(m_Value(op0), m_Value(op1)))) {
+              auto *or_inst = llvm::BinaryOperator::CreateOr(op0, op1);
+              replace_and_verify(or_inst);
             }
           }
         }
