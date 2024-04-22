@@ -119,7 +119,7 @@ Results verify(llvm::Function &F1, llvm::Function &F2,
         for (auto &I : llvm::make_early_inc_range(BB)) {
           using namespace llvm::PatternMatch;
 
-          if (llvm::isa<llvm::ZExtInst>(I)) {
+          if (llvm::isa<llvm::PossiblyNonNegInst>(I)) {
             if (!I.hasNonNeg()) {
               I.setNonNeg(true);
               if (verify())
@@ -127,7 +127,17 @@ Results verify(llvm::Function &F1, llvm::Function &F2,
               else
                 I.setNonNeg(false);
             }
-          } else if (llvm::isa<llvm::OverflowingBinaryOperator>(I)) {
+          }
+          else if (auto *PDI = llvm::dyn_cast<llvm::PossiblyDisjointInst>(&I)) {
+            if (!PDI->isDisjoint()) {
+              PDI->setIsDisjoint(true);
+              if (verify())
+                changed = true;
+              else
+                PDI->setIsDisjoint(false);
+            }
+          }
+          else if (llvm::isa<llvm::OverflowingBinaryOperator>(I) || llvm::isa<llvm::TruncInst>(I)) {
             if (!I.hasNoSignedWrap()) {
               I.setHasNoSignedWrap(true);
               if (verify())
