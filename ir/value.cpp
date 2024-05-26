@@ -18,10 +18,6 @@ namespace IR {
 
 VoidValue Value::voidVal;
 
-bool Value::isVoid() const {
-  return &getType() == &Type::voidTy;
-}
-
 void Value::rauw(const Value &what, Value &with) {
   UNREACHABLE();
 }
@@ -80,6 +76,12 @@ StateValue NullPointerValue::toSMT(State &s) const {
   return { Pointer::mkNullPointer(s.getMemory()).release(), true };
 }
 
+
+void GlobalVariable::increaseSize(uint64_t newsize) {
+  assert(!arbitrary_size);
+  assert(newsize >= allocsize);
+  allocsize = newsize;
+}
 
 void GlobalVariable::print(ostream &os) const {
   os << getName() << " = " << (isconst ? "constant " : "global ");
@@ -181,9 +183,13 @@ static string attr_str(const ParamAttrs &attr) {
   return std::move(ss).str();
 }
 
-Input::Input(Type &type, string &&name, ParamAttrs &&attributes)
-  : Value(type, attr_str(attributes) + name), smt_name(std::move(name)),
-    attrs(std::move(attributes)) {}
+Input::Input(Type &type, string &&name)
+  : Value(type, std::string(name)), smt_name(std::move(name)) {}
+
+void Input::setAttributes(ParamAttrs &&new_attrs) {
+  attrs = std::move(new_attrs);
+  setName(attr_str(attrs) + getName());
+}
 
 void Input::copySMTName(const Input &other) {
   smt_name = other.smt_name;
@@ -216,7 +222,11 @@ StateValue Input::mkInput(State &s, const Type &ty, unsigned child) const {
   if (hasAttribute(ParamAttrs::ByVal)) {
     unsigned bid;
     expr size = expr::mkUInt(attrs.blockSize, bits_size_t);
-    val = get_global(s, smt_name, &size, attrs.align, false, bid);
+    val = Pointer(s.getMemory(),
+                  get_global(s, smt_name, &size, attrs.align, false, bid))
+          .setAttrs(attrs)
+          .setIsBasedOnArg()
+          .release();
     bool is_const = hasAttribute(ParamAttrs::NoWrite) ||
                     !s.getFn().getFnAttrs().mem.canWrite(MemoryAccess::Args);
     s.getMemory().markByVal(bid, is_const);
@@ -228,6 +238,8 @@ StateValue Input::mkInput(State &s, const Type &ty, unsigned child) const {
   auto undef_mask = getUndefVar(ty, child);
   if (config::disable_undef_input || attrs.poisonImpliesUB()) {
     s.addUB(undef_mask == 0);
+  } else if (s.isAsmMode()) {
+    // do nothing; there's no undef in assembly
   } else {
     auto [undef, var] = ty.mkUndefInput(s, attrs);
     if (undef_mask.bits() == 1)
@@ -243,6 +255,9 @@ StateValue Input::mkInput(State &s, const Type &ty, unsigned child) const {
   expr np = expr::mkBoolVar(("np_" + getSMTName(child)).c_str());
   if (never_poison) {
     s.addUB(std::move(np));
+    np = true;
+  } else if (s.isAsmMode()) {
+    // There's no poison in assembly
     np = true;
   }
 

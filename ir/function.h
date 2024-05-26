@@ -128,6 +128,7 @@ public:
   const BasicBlock& getFirstBB() const { return *BB_order[0]; }
   BasicBlock& getFirstBB() { return *BB_order[0]; }
   const BasicBlock& getSinkBB() const { return sink_bb; }
+  BasicBlock& getBB(unsigned idx) { return *BB_order.at(idx); }
   BasicBlock& getBB(std::string_view name, bool push_front = false);
   const BasicBlock& getBB(std::string_view name) const;
   const BasicBlock& bbOf(const Instr &i) const;
@@ -142,7 +143,7 @@ public:
   }
   unsigned numConstants() const { return constants.size(); }
   Value &getConstant(int idx) const { return *constants[idx]; }
-  Value* getConstant(std::string_view name) const;
+  Value* getGlobalVar(std::string_view name) const;
 
   std::vector<GlobalVariable *> getGlobalVars() const;
   std::vector<std::string_view> getGlobalVarNames() const;

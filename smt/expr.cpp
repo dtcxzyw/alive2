@@ -295,8 +295,10 @@ expr expr::mkVar(const char *name, const expr &type) {
   return ::mkVar(name, type.sort());
 }
 
-expr expr::mkVar(const char *name, unsigned bits) {
-  return ::mkVar(name, mkBVSort(bits));
+expr expr::mkVar(const char *name, unsigned bits, bool fresh) {
+  auto sort = mkBVSort(bits);
+  return fresh ? Z3_mk_fresh_const(ctx(), name, sort)
+               : ::mkVar(name, sort);
 }
 
 expr expr::mkBoolVar(const char *name) {
@@ -421,9 +423,7 @@ bool expr::isSMax() const {
 }
 
 expr expr::isNegative() const {
-  C();
-  auto bit = bits() - 1;
-  return extract(bit, bit) == 1;
+  return sign() == 1;
 }
 
 unsigned expr::bits() const {
@@ -540,6 +540,21 @@ bool expr::isStore(expr &array, expr &idx, expr &val) const {
 
 bool expr::isLoad(expr &array, expr &idx) const {
   return isBinOp(array, idx, Z3_OP_SELECT);
+}
+
+bool expr::isLambda(expr &body) const {
+  C();
+  if (Z3_is_lambda(ctx(), ast())) {
+    assert(Z3_get_quantifier_num_bound(ctx(), ast()) == 1);
+    body = Z3_get_quantifier_body(ctx(), ast());
+    return true;
+  }
+  return false;
+}
+expr expr::lambdaIdxType() const {
+  C();
+  assert(Z3_get_quantifier_num_bound(ctx(), ast()) == 1);
+  return ::mkVar("sort", Z3_get_quantifier_bound_sort(ctx(), ast(), 0));
 }
 
 bool expr::isFPAdd(expr &rounding, expr &lhs, expr &rhs) const {
@@ -713,6 +728,9 @@ expr expr::sdiv(const expr &rhs) const {
   if (rhs.isZero())
     return rhs;
 
+  if (isZero())
+    return *this;
+
   if (isSMin() && rhs.isAllOnes())
     return mkUInt(0, sort());
 
@@ -726,11 +744,14 @@ expr expr::udiv(const expr &rhs) const {
   if (rhs.isZero())
     return rhs;
 
+  if (isZero())
+    return *this;
+
   return binop_fold(rhs, Z3_mk_bvudiv);
 }
 
 expr expr::srem(const expr &rhs) const {
-  if (eq(rhs) || (isSMin() && rhs.isAllOnes()))
+  if (eq(rhs) || isZero() || (isSMin() && rhs.isAllOnes()))
     return mkUInt(0, sort());
 
   if (rhs.isZero())
@@ -744,7 +765,7 @@ expr expr::srem(const expr &rhs) const {
 
 expr expr::urem(const expr &rhs) const {
   C();
-  if (eq(rhs))
+  if (eq(rhs) || isZero())
     return mkUInt(0, sort());
 
   uint64_t n, log;
@@ -830,8 +851,7 @@ expr expr::add_no_uoverflow(const expr &rhs) const {
   if (isConst())
     return rhs.add_no_uoverflow(*this);
 
-  auto bw = bits();
-  return (zext(1) + rhs.zext(1)).extract(bw, bw) == 0;
+  return (zext(1) + rhs.zext(1)).sign() == 0;
 }
 
 expr expr::sub_no_soverflow(const expr &rhs) const {
@@ -841,8 +861,7 @@ expr expr::sub_no_soverflow(const expr &rhs) const {
 }
 
 expr expr::sub_no_uoverflow(const expr &rhs) const {
-  auto bw = bits();
-  return (zext(1) - rhs.zext(1)).extract(bw, bw) == 0;
+  return (zext(1) - rhs.zext(1)).sign() == 0;
 }
 
 expr expr::mul_no_soverflow(const expr &rhs) const {
@@ -1096,6 +1115,11 @@ expr expr::abs() const {
   C();
   auto s = sort();
   return mkIf(sge(mkUInt(0, s)), *this, mkInt(-1, s) * *this);
+}
+
+expr expr::round_up(const expr &power_of_two) const {
+  expr minus_1 = power_of_two - mkUInt(1, power_of_two);
+  return (*this + minus_1) & ~minus_1;
 }
 
 #define fold_fp_neg(fn)                                  \
@@ -1530,7 +1554,7 @@ expr expr::cmp_eq(const expr &rhs, bool simplify) const {
         return a == b;
 
       // (sext a) == 0 -> a == 0
-      if (b.isZero())
+      if (rhs.isZero())
         return a == mkUInt(0, a);
     }
   }
@@ -1658,7 +1682,7 @@ expr expr::ugt(const expr &rhs) const {
 }
 
 expr expr::sle(const expr &rhs) const {
-  if (eq(rhs))
+  if (eq(rhs) || rhs.isSMax())
     return true;
 
   return binop_fold(rhs, Z3_mk_bvsle);
@@ -1783,6 +1807,10 @@ expr expr::concat(const expr &rhs) const {
   if (isConcat(a, b) && b.isExtract(c, h, l) && rhs.isExtract(d, h2, l2) &&
       l == h2+1 && c.eq(d))
     return a.concat(c.extract(h, l2));
+
+  // (concat const (concat const2 x))
+  if (isConst() && rhs.isConcat(a, b) && a.isConst())
+    return concat(a).concat(b);
 
   return binop_fold(rhs, Z3_mk_concat);
 }
@@ -1984,27 +2012,29 @@ expr expr::store(const expr &idx, const expr &val) const {
   return Z3_mk_store(ctx(), ast(), idx(), val());
 }
 
-expr expr::load(const expr &idx) const {
+expr expr::load(const expr &idx, uint64_t max_idx) const {
   C(idx);
 
   // TODO: add support for alias analysis plugin
   expr array, str_idx, val;
   if (isStore(array, str_idx, val)) { // store(array, idx, val)
+    uint64_t str_idx_val;
+    // loaded idx can't possibly match the stored idx; there's UB otherwise
+    if (str_idx.isUInt(str_idx_val) && str_idx_val > max_idx)
+      return array.load(idx, max_idx);
+
     expr cmp = idx == str_idx;
     if (cmp.isTrue())
       return val;
 
-    auto loaded = array.load(idx);
+    auto loaded = array.load(idx, max_idx);
     if (cmp.isFalse() || val.eq(loaded))
       return loaded;
 
   } else if (isConstArray(val)) {
     return val;
-
-  } else if (Z3_is_lambda(ctx(), ast())) {
-    assert(Z3_get_quantifier_num_bound(ctx(), ast()) == 1);
-    expr body = Z3_get_quantifier_body(ctx(), ast());
-    return body.subst({ idx }).foldTopLevel();
+  } else if (isLambda(val)) {
+    return val.subst({ idx }).foldTopLevel();
   }
 
   return Z3_mk_select(ctx(), ast(), idx());
@@ -2032,12 +2062,21 @@ expr expr::mkIf(const expr &cond, const expr &then, const expr &els) {
 
   expr lhs, rhs;
   // (ite (= x 1) 1 0) -> x
-  if (then.isBV() && then.bits() == 1 && then.isOne() && els.isZero() &&
-      cond.isEq(lhs, rhs) && lhs.isBV() && lhs.bits() == 1) {
-    if (lhs.isOne())
-      return rhs;
-    if (rhs.isOne())
-      return lhs;
+  // (ite (= x 1) 0 1) -> (not x)
+  if (then.isBV() && then.bits() == 1 && cond.isEq(lhs, rhs) &&
+      lhs.isBV() && lhs.bits() == 1) {
+    if (then.isOne() && els.isZero()) {
+      if (lhs.isOne())
+        return rhs;
+      if (rhs.isOne())
+        return lhs;
+    }
+    if (then.isZero() && els.isOne()) {
+      if (lhs.isOne())
+        return ~rhs;
+      if (rhs.isOne())
+        return ~lhs;
+    }
   }
 
   // (ite c a (ite c2 a b)) -> (ite (or c c2) a b)
@@ -2052,7 +2091,7 @@ expr expr::mkForAll(const set<expr> &vars, expr &&val) {
   if (vars.empty() || val.isConst() || !val.isValid())
     return std::move(val);
 
-  unique_ptr<Z3_app[]> vars_ast(new Z3_app[vars.size()]);
+  auto vars_ast = make_unique<Z3_app[]>(vars.size());
   unsigned i = 0;
   for (auto &v : vars) {
     vars_ast[i++] = (Z3_app)v();
@@ -2114,8 +2153,8 @@ expr expr::subst(const vector<pair<expr, expr>> &repls) const {
   if (repls.empty())
     return *this;
 
-  unique_ptr<Z3_ast[]> from(new Z3_ast[repls.size()]);
-  unique_ptr<Z3_ast[]> to(new Z3_ast[repls.size()]);
+  auto from = make_unique<Z3_ast[]>(repls.size());
+  auto to   = make_unique<Z3_ast[]>(repls.size());
 
   unsigned i = 0;
   for (auto &p : repls) {

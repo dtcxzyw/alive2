@@ -7,6 +7,7 @@
 #include "util/hash.h"
 #include "util/sort.h"
 #include "util/unionfind.h"
+#include <algorithm>
 #include <fstream>
 #include <set>
 #include <unordered_set>
@@ -105,7 +106,7 @@ void BasicBlock::rauw(const Value &what, Value &with) {
 
 ostream& operator<<(ostream &os, const BasicBlock &bb) {
   if (!bb.name.empty())
-    os << bb.name << ":\n";
+    os << string_view(bb.name).substr(1) << ":\n";
   for (auto &i : bb.instrs()) {
     os << "  ";
     i.print(os);
@@ -225,7 +226,7 @@ void Function::addConstant(unique_ptr<Value> &&c) {
   constants.emplace_back(std::move(c));
 }
 
-Value* Function::getConstant(string_view name) const {
+Value* Function::getGlobalVar(string_view name) const {
   for (auto &c : constants) {
     if (c->getName() == name)
       return c.get();
@@ -244,9 +245,9 @@ vector<GlobalVariable *> Function::getGlobalVars() const {
 
 vector<string_view> Function::getGlobalVarNames() const {
   vector<string_view> gvnames;
-  auto gvs = getGlobalVars();
-  transform(gvs.begin(), gvs.end(), back_inserter(gvnames),
-            [](auto &itm) { return string_view(itm->getName()).substr(1); });
+  ranges::transform(
+    getGlobalVars(), back_inserter(gvnames),
+    [](auto &itm) { return string_view(itm->getName()).substr(1); });
   return gvnames;
 }
 
@@ -300,7 +301,7 @@ void Function::syncDataWithSrc(Function &src) {
   auto copy_fns = [](const auto &src, auto &dst) {
     for (auto &c : src.getConstants()) {
       auto *gv = dynamic_cast<const GlobalVariable*>(&c);
-      if (gv && gv->isArbitrarySize() && !dst.getConstant(gv->getName()))
+      if (gv && gv->isArbitrarySize() && !dst.getGlobalVar(gv->getName()))
         dst.addConstant(make_unique<GlobalVariable>(*gv));
     }
   };
@@ -339,10 +340,11 @@ static void add_users(Function::UsersTy &users, Value *i, BasicBlock *bb,
                       Value *val) {
   if (auto *agg = dynamic_cast<AggregateValue*>(val)) {
     for (auto elem : agg->getVals()) {
-      add_users(users, i, bb, elem);
+      add_users(users, val, bb, elem);
     }
   }
-  users[val].emplace(i, bb);
+  if (i != val)
+    users[val].emplace(i, bb);
 }
 
 void Function::addFnDecl(FnDecl &&decl) {
@@ -847,7 +849,7 @@ void Function::print(ostream &os, bool print_header) const {
         os << input.second << *input.first;
         first = false;
       }
-      os << ")\n";
+      os << ')' << decl.attrs << '\n';
     }
     os << '\n';
   }

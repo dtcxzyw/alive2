@@ -13,8 +13,6 @@ using namespace smt;
 using namespace std;
 using namespace util;
 
-static unsigned ptr_next_idx;
-
 static expr prepend_if(const expr &pre, expr &&e, bool prepend) {
   return prepend ? pre.concat(e) : std::move(e);
 }
@@ -39,12 +37,13 @@ static expr attr_to_bitvec(const ParamAttrs &attrs) {
 
   uint64_t bits = 0;
   auto idx = 0;
-  auto to_bit = [&](bool b, const ParamAttrs::Attribute &a) -> uint64_t {
-    return b ? ((attrs.has(a) ? 1 : 0) << idx++) : 0;
+  auto add = [&](bool b, const ParamAttrs::Attribute &a) {
+    bits |= b ? (attrs.has(a) << idx++) : 0;
   };
-  bits |= to_bit(has_nocapture, ParamAttrs::NoCapture);
-  bits |= to_bit(has_noread, ParamAttrs::NoRead);
-  bits |= to_bit(has_nowrite, ParamAttrs::NoWrite);
+  add(has_nocapture, ParamAttrs::NoCapture);
+  add(has_noread, ParamAttrs::NoRead);
+  add(has_nowrite, ParamAttrs::NoWrite);
+  add(has_ptr_arg, ParamAttrs::IsArg);
   return expr::mkUInt(bits, bits_for_ptrattrs);
 }
 
@@ -59,13 +58,9 @@ Pointer::Pointer(const Memory &m, const expr &bid, const expr &offset,
 
 Pointer::Pointer(const Memory &m, const char *var_name, const expr &local,
                  bool unique_name, bool align, const ParamAttrs &attr) : m(m) {
-  string name = var_name;
-  if (unique_name)
-    name += '!' + to_string(ptr_next_idx++);
-
   unsigned bits = total_bits_short() + !align * zeroBitsShortOffset();
   p = prepend_if(local.toBVBool(),
-                 expr::mkVar(name.c_str(), bits), hasLocalBit());
+                 expr::mkVar(var_name, bits, unique_name), hasLocalBit());
   if (align)
     p = p.concat_zeros(zeroBitsShortOffset());
   if (bits_for_ptrattrs)
@@ -354,12 +349,10 @@ expr Pointer::isBlockAligned(uint64_t align, bool exact) const {
 }
 
 expr Pointer::isAligned(uint64_t align) {
-  if (align == 0)
-    return isNull();
   if (align == 1)
     return true;
   if (!is_power2(align))
-    return false;
+    return isNull();
 
   auto offset = getOffset();
   if (isUndef(offset))
@@ -394,10 +387,9 @@ expr Pointer::isAligned(const expr &align) {
     return isAligned(n);
 
   return
-    expr::mkIf(align == 0,
-               isNull(),
-               align.isPowerOf2() &&
-                 getAddress().urem(align.zextOrTrunc(bits_ptr_address)) == 0);
+    expr::mkIf(align.isPowerOf2(),
+               getAddress().urem(align.zextOrTrunc(bits_ptr_address)) == 0,
+               isNull());
 }
 
 static pair<expr, expr> is_dereferenceable(Pointer &p,
@@ -435,9 +427,13 @@ static pair<expr, expr> is_dereferenceable(Pointer &p,
 // When bytes is 0, pointer is always dereferenceable
 pair<AndExpr, expr>
 Pointer::isDereferenceable(const expr &bytes0, uint64_t align,
-                           bool iswrite, bool ignore_accessability) {
-  expr bytes_off = bytes0.zextOrTrunc(bits_for_offset);
+                           bool iswrite, bool ignore_accessability,
+                           bool round_size_to_align) {
   expr bytes = bytes0.zextOrTrunc(bits_size_t);
+  if (round_size_to_align)
+    bytes = bytes.round_up(expr::mkUInt(align, bits_size_t));
+  expr bytes_off = bytes.zextOrTrunc(bits_for_offset);
+
   DisjointExpr<expr> UB(expr(false)), is_aligned(expr(false)), all_ptrs;
 
   for (auto &[ptr_expr, domain] : DisjointExpr<expr>(p, 3)) {
@@ -472,9 +468,10 @@ Pointer::isDereferenceable(const expr &bytes0, uint64_t align,
 
 pair<AndExpr, expr>
 Pointer::isDereferenceable(uint64_t bytes, uint64_t align,
-                           bool iswrite, bool ignore_accessability) {
+                           bool iswrite, bool ignore_accessability,
+                           bool round_size_to_align) {
   return isDereferenceable(expr::mkUInt(bytes, bits_size_t), align, iswrite,
-                           ignore_accessability);
+                           ignore_accessability, round_size_to_align);
 }
 
 // This function assumes that both begin + len don't overflow
@@ -504,11 +501,11 @@ expr Pointer::getAllocType() const {
                    expr::mkUInt(0, 2));
 }
 
-expr Pointer::isStackAllocated() const {
+expr Pointer::isStackAllocated(bool simplify) const {
   // 1) if a stack object is returned by a callee it's UB
   // 2) if a stack object is given as argument by the caller, we can upgrade it
   //    to a global object, so we can do POR here.
-  if (!has_alloca || isLocal().isFalse())
+  if (simplify && (!has_alloca || isLocal().isFalse()))
     return false;
   return getAllocType() == STACK;
 }
@@ -519,7 +516,7 @@ expr Pointer::isHeapAllocated() const {
 }
 
 expr Pointer::refined(const Pointer &other) const {
-  bool is_asm = other.m.state->getFn().has(FnAttrs::Asm);
+  bool is_asm = other.m.isAsmMode();
 
   // This refers to a block that was malloc'ed within the function
   expr local = other.isLocal();
@@ -538,12 +535,14 @@ expr Pointer::refined(const Pointer &other) const {
 
   return expr::mkIf(isNull(), other.isNull(),
                     expr::mkIf(isLocal(), std::move(local), nonlocal) &&
-                      isBlockAlive().implies(other_deref.isBlockAlive()));
+                      // FIXME: this should be disabled just for phy pointers
+                      (is_asm ? expr(true)
+                        : isBlockAlive().implies(other_deref.isBlockAlive())));
 }
 
 expr Pointer::fninputRefined(const Pointer &other, set<expr> &undef,
                              const expr &byval_bytes) const {
-  bool is_asm = other.m.state->getFn().has(FnAttrs::Asm);
+  bool is_asm = other.m.isAsmMode();
   expr size = blockSizeOffsetT();
   expr off = getOffsetSizet();
   expr size2 = other.blockSizeOffsetT();
@@ -579,7 +578,9 @@ expr Pointer::fninputRefined(const Pointer &other, set<expr> &undef,
 
   return expr::mkIf(isNull(), other.isNull(),
                     expr::mkIf(isLocal(), local, nonlocal) &&
-                      isBlockAlive().implies(other_deref.isBlockAlive()));
+                      // FIXME: this should be disabled just for phy pointers
+                      (is_asm ? expr(true)
+                        : isBlockAlive().implies(other_deref.isBlockAlive())));
 }
 
 expr Pointer::isWritable() const {
@@ -621,17 +622,34 @@ expr Pointer::isNocapture(bool simplify) const {
   return p.extract(0, 0) == 1;
 }
 
+#define GET_ATTR(attr, idx)          \
+  if (!attr)                         \
+    return false;                    \
+  unsigned idx_ = idx;               \
+  return p.extract(idx_, idx_) == 1;
+
 expr Pointer::isNoRead() const {
-  if (!has_noread)
-    return false;
-  return p.extract(has_nocapture, has_nocapture) == 1;
+  GET_ATTR(has_noread, (unsigned)has_nocapture);
 }
 
 expr Pointer::isNoWrite() const {
-  if (!has_nowrite)
-    return false;
-  unsigned idx = (unsigned)has_nocapture + (unsigned)has_noread;
-  return p.extract(idx, idx) == 1;
+  GET_ATTR(has_nowrite, (unsigned)has_nocapture + (unsigned)has_noread);
+}
+
+expr Pointer::isBasedOnArg() const {
+  GET_ATTR(has_ptr_arg, (unsigned)has_nocapture + (unsigned)has_noread +
+                        (unsigned)has_nowrite);
+}
+
+Pointer Pointer::setAttrs(const ParamAttrs &attr) const {
+  return { m, getBid(), getOffset(), getAttrs() | attr_to_bitvec(attr) };
+}
+
+Pointer Pointer::setIsBasedOnArg() const {
+  unsigned idx = (unsigned)has_nocapture + (unsigned)has_noread +
+                 (unsigned)has_nowrite;
+  auto attrs = getAttrs();
+  return { m, getBid(), getOffset(), attrs | expr::mkUInt(1 << idx, attrs) };
 }
 
 Pointer Pointer::mkNullPointer(const Memory &m) {
@@ -648,8 +666,10 @@ expr Pointer::isNull() const {
   return *this == mkNullPointer(m);
 }
 
-void Pointer::resetGlobals() {
-  ptr_next_idx = 0;
+Pointer
+Pointer::mkIf(const expr &cond, const Pointer &then, const Pointer &els) {
+  assert(&then.m == &els.m);
+  return Pointer(then.m, expr::mkIf(cond, then.p, els.p));
 }
 
 ostream& operator<<(ostream &os, const Pointer &p) {
@@ -662,9 +682,13 @@ ostream& operator<<(ostream &os, const Pointer &p) {
   else                 \
     os << field
 
-  os << "pointer(" << (p.isLocal().isTrue() ? "local" : "non-local")
-     << ", block_id=";
-  P(p.getBid(), printUnsigned);
+  os << "pointer(";
+  if (p.isLocal().isConst())
+    os << (p.isLocal().isTrue() ? "local" : "non-local");
+  else
+    os << "local=" << p.isLocal();
+  os << ", block_id=";
+  P(p.getShortBid(), printUnsigned);
 
   os << ", offset=";
   P(p.getOffset(), printSigned);

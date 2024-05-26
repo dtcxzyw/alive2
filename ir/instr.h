@@ -35,7 +35,7 @@ public:
             SAdd_Overflow, UAdd_Overflow, SSub_Overflow, USub_Overflow,
             SMul_Overflow, UMul_Overflow,
             And, Or, Xor, Cttz, Ctlz, UMin, UMax, SMin, SMax, Abs };
-  enum Flags { None = 0, NSW = 1 << 0, NUW = 1 << 1, Exact = 1 << 2 };
+  enum Flags { None = 0, NSW = 1 << 0, NUW = 1 << 1, Exact = 1 << 2, Disjoint = 1 << 3 };
 
 private:
   Value *lhs, *rhs;
@@ -259,14 +259,16 @@ public:
 class ConversionOp final : public Instr {
 public:
   enum Op { SExt, ZExt, Trunc, BitCast, Ptr2Int, Int2Ptr };
+  enum Flags { None = 0, NNEG = 1 << 0, NSW = 1 << 1, NUW = 1 << 2 };
 
 private:
   Value *val;
   Op op;
+  unsigned flags;
 
 public:
-  ConversionOp(Type &type, std::string &&name, Value &val, Op op)
-    : Instr(type, std::move(name)), val(&val), op(op) {}
+  ConversionOp(Type &type, std::string &&name, Value &val, Op op,
+               unsigned flags = None);
 
   Op getOp() const { return op; }
   Value& getValue() const { return *val; }
@@ -286,17 +288,19 @@ class FpConversionOp final : public Instr {
 public:
   enum Op { SIntToFP, UIntToFP, FPToSInt, FPToUInt, FPExt, FPTrunc, LRInt,
             LRound };
+  enum Flags { None = 0, NNEG = 1 << 0 };
 
 private:
   Value *val;
   Op op;
   FpRoundingMode rm;
   FpExceptionMode ex;
+  unsigned flags;
 
 public:
   FpConversionOp(Type &type, std::string &&name, Value &val, Op op,
-                 FpRoundingMode rm = {}, FpExceptionMode ex = {})
-    : Instr(type, std::move(name)), val(&val), op(op), rm(rm), ex(ex) {}
+                 FpRoundingMode rm = {}, FpExceptionMode ex = {},
+                 unsigned flags = None);
 
   std::vector<Value*> operands() const override;
   bool propagatesPoison() const override;
@@ -419,11 +423,14 @@ private:
   Value *a, *b;
   Cond cond;
   FastMathFlags fmath;
+  FpExceptionMode ex;
+  bool signaling;
 
 public:
   FCmp(Type &type, std::string &&name, Cond cond, Value &a, Value &b,
-       FastMathFlags fmath)
-    : Instr(type, std::move(name)), a(&a), b(&b), cond(cond), fmath(fmath) {}
+       FastMathFlags fmath, FpExceptionMode ex = {}, bool signaling = false)
+    : Instr(type, std::move(name)), a(&a), b(&b), cond(cond), fmath(fmath),
+      ex(ex), signaling(signaling) {}
 
   std::vector<Value*> operands() const override;
   bool propagatesPoison() const override;
@@ -584,9 +591,11 @@ class Assume final : public Instr {
 public:
   enum Kind {
     AndNonPoison, /// cond should be non-poison and hold
-    WellDefined, /// cond only needs to be well defined (can be false)
-    Align,       /// args[0] satisfies alignment args[1]
-    NonNull      /// args[0] is a nonnull pointer
+    WellDefined,  /// cond only needs to be well defined (can be false)
+    Align,        /// args[0] satisfies alignment args[1]
+    Dereferenceable,       /// args[0] is dereferenceable at least args[1]
+    DereferenceableOrNull, /// args[0] is null or deref least args[1]
+    NonNull       /// args[0] is a nonnull pointer
   };
 
 private:

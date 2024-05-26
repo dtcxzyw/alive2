@@ -18,6 +18,7 @@
 #include <iostream>
 #include <map>
 #include <numeric>
+#include <queue>
 #include <set>
 #include <sstream>
 #include <unordered_map>
@@ -187,6 +188,7 @@ static bool error(Errors &errs, State &src_state, State &tgt_state,
         if (bw == Pointer::totalBits()) {
           Pointer p(src_state.returnMemory(), var);
           reduce(p.getOffset());
+          reduce(p.getAddress());
         }
       }
     } else if (var.isFloat()) {
@@ -494,64 +496,76 @@ check_refinement(Errors &errs, const Transform &t, State &src_state,
   auto &fn_qvars = tgt_state.getFnQuantVars();
   qvars.insert(fn_qvars.begin(), fn_qvars.end());
 
-  AndExpr axioms = src_state.getAxioms();
-  axioms.add(tgt_state.getAxioms());
-  expr axioms_expr = axioms();
+  expr axioms_expr;
+  {
+    AndExpr axioms = src_state.getAxioms();
+    axioms.add(tgt_state.getAxioms());
+    axioms_expr = std::move(axioms)();
+  }
+
+  if (check_expr(axioms_expr && fndom_a).isUnsat()) {
+    if (config::fail_if_src_is_ub) {
+      errs.add("Source function is always UB", false);
+      return;
+    } else {
+      errs.addWarning(
+        "Source function is always UB.\n"
+        "It can be refined by any target function.\n"
+        "Please make sure this is what you wanted.");
+    }
+  }
+
+  {
+    auto sink_src = src_state.sinkDomain(false);
+    if (!sink_src.isFalse() && check_expr(axioms_expr && !sink_src).isUnsat()) {
+      errs.add("The source program doesn't reach a return instruction.\n"
+               "Consider increasing the unroll factor if it has loops", false);
+      return;
+    }
+
+    if (auto sink_tgt = tgt_state.sinkDomain(false);
+        !sink_src.eq(sink_tgt) &&
+        !sink_tgt.isFalse() &&
+        check_expr(axioms_expr && (!sink_tgt || sink_src)).isUnsat()) {
+      errs.add("The target program doesn't reach a return instruction.\n"
+               "Consider increasing the unroll factor if it has loops", false);
+      return;
+    }
+  }
 
   // note that precondition->toSMT() may add stuff to getPre,
   // so order here matters
   // FIXME: broken handling of transformation precondition
   //src_state.startParsingPre();
   //expr pre = t.precondition ? t.precondition->toSMT(src_state) : true;
-  auto pre_src_and = src_state.getPre();
-  auto &pre_tgt_and = tgt_state.getPre();
-
-  // optimization: rewrite "tgt /\ (src -> foo)" to "tgt /\ foo" if src = tgt
-  pre_src_and.del(pre_tgt_and);
-  expr pre_src = pre_src_and();
-  expr pre_tgt = pre_tgt_and();
-
-  if (check_expr(axioms_expr && (pre_src && pre_tgt)).isUnsat()) {
-    errs.add("Precondition is always false", false);
-    return;
-  }
-
-  if (config::check_if_src_is_ub &&
-      check_expr(axioms_expr && fndom_a).isUnsat()) {
-    errs.add("Source function is always UB", false);
-    return;
-  }
-
+  expr pre, pre_src_forall;
   {
-    auto sink_src = src_state.sinkDomain();
-    if (!sink_src.isTrue() && check_expr(axioms_expr && !sink_src).isUnsat()) {
-      errs.add("The source program doesn't reach a return instruction.\n"
-               "Consider increasing the unroll factor if it has loops", false);
-      return;
+    expr pre_src, pre_tgt;
+    {
+      auto pre_src_and = src_state.getPre();
+      auto &pre_tgt_and = tgt_state.getPre();
+
+      // optimization: rewrite "tgt /\ (src -> foo)" to "tgt /\ foo" if src=tgt
+      pre_src_and.del(pre_tgt_and);
+      pre_src = std::move(pre_src_and)();
+      pre_tgt = pre_tgt_and();
     }
 
-    auto sink_tgt = tgt_state.sinkDomain();
-    if (!sink_tgt.isTrue() && check_expr(axioms_expr && !sink_tgt).isUnsat()) {
-      errs.add("The target program doesn't reach a return instruction.\n"
-               "Consider increasing the unroll factor if it has loops", false);
+    if (check_expr(axioms_expr && (pre_src && pre_tgt)).isUnsat()) {
+      errs.add("Precondition is always false", false);
       return;
     }
-
-    pre_tgt &= !sink_tgt;
-  }
-
-  expr pre_src_exists, pre_src_forall;
-  {
-    vector<pair<expr,expr>> repls;
+  
+    vector<pair<expr, expr>> repls;
     auto vars_pre = pre_src.vars();
     for (auto &v : qvars) {
       if (vars_pre.count(v))
         repls.emplace_back(v, expr::mkFreshVar("#exists", v));
     }
-    pre_src_exists = pre_src.subst(repls);
+    auto pre_src_exists = pre_src.subst(repls);
     pre_src_forall = pre_src_exists.eq(pre_src) ? true : pre_src;
+    pre = pre_src_exists && pre_tgt && src_state.getFnPre();
   }
-  expr pre = pre_src_exists && pre_tgt && src_state.getFnPre();
   pre_src_forall &= tgt_state.getFnPre();
 
   auto mk_fml = [&](expr &&refines) -> expr {
@@ -601,9 +615,17 @@ check_refinement(Errors &errs, const Transform &t, State &src_state,
           [](ostream&, const Model&){}, "Target has reachable unreachable");
   }
 
-  // 1. Check UB
-  CHECK(fndom_a.notImplies(fndom_b),
-        [](ostream&, const Model&){}, "Source is more defined than target");
+  {
+    // avoid false-positives in refinement query 1 due to bounded unrolling
+    expr pre_old = pre;
+    pre &= !tgt_state.sinkDomain(true);
+
+    // 1. Check UB
+    CHECK(fndom_a.notImplies(fndom_b),
+          [](ostream&, const Model&){}, "Source is more defined than target");
+
+    pre = std::move(pre_old);
+  }
 
   // 2. Check return domain (noreturn check)
   {
@@ -641,6 +663,7 @@ check_refinement(Errors &errs, const Transform &t, State &src_state,
     CHECK(dom && !poison_cnstr,
           print_value, "Target is more poisonous than source");
   }
+  poison_cnstr = {};
 
   // 4. Check undef
   if (config::disallow_ub_exploitation) {
@@ -955,6 +978,7 @@ static void calculateAndInitConstants(Transform &t) {
   observes_addresses  = false;
   bool does_any_byte_access = false;
   has_indirect_fncalls = false;
+  has_ptr_arg = false;
 
   set<string> inaccessiblememonly_fns;
   num_inaccessiblememonly_fns = 0;
@@ -986,6 +1010,8 @@ static void calculateAndInitConstants(Transform &t) {
       auto *i = dynamic_cast<const Input *>(&v);
       if (!i)
         continue;
+
+      has_ptr_arg |= hasPtr(i->getType());
 
       update_min_vect_sz(i->getType());
 
@@ -1130,6 +1156,9 @@ static void calculateAndInitConstants(Transform &t) {
   if (!does_int_mem_access && !does_ptr_mem_access && has_fncall)
     does_int_mem_access = true;
 
+  if (does_int_mem_access && t.tgt.has(FnAttrs::Asm))
+    does_ptr_mem_access = true;
+
   auto has_attr = [&](ParamAttrs::Attribute a) -> bool {
     for (auto fn : { &t.src, &t.tgt }) {
       for (auto &v : fn->getInputs()) {
@@ -1151,7 +1180,9 @@ static void calculateAndInitConstants(Transform &t) {
   has_nocapture = has_attr(ParamAttrs::NoCapture);
   has_noread = has_attr(ParamAttrs::NoRead);
   has_nowrite = has_attr(ParamAttrs::NoWrite);
-  bits_for_ptrattrs = has_nocapture + has_noread + has_nowrite;
+  has_ptr_arg &= !t.src.getFnAttrs().mem.canAccessAnything() ||
+                 !t.tgt.getFnAttrs().mem.canAccessAnything();
+  bits_for_ptrattrs = has_nocapture + has_noread + has_nowrite + has_ptr_arg;
 
   // ceil(log2(maxblks)) + 1 for local bit
   bits_for_bid = max(1u, ilog2_ceil(max(num_locals, num_nonlocals), false))
@@ -1231,6 +1262,7 @@ static void calculateAndInitConstants(Transform &t) {
                   << "\ndoes_mem_access: " << does_mem_access
                   << "\ndoes_ptr_mem_access: " << does_ptr_mem_access
                   << "\ndoes_int_mem_access: " << does_int_mem_access
+                  << "\nhas_ptr_arg: " << has_ptr_arg
                   << '\n';
 }
 
@@ -1592,8 +1624,25 @@ static void optimize_ptrcmp(Function &f) {
 }
 
 void Transform::preprocess() {
-  if (config::tgt_is_asm)
+  if (config::tgt_is_asm) {
     tgt.getFnAttrs().set(FnAttrs::Asm);
+
+    // there are no #side-effect things in assembly
+    vector<Instr*> to_remove;
+    for (auto &bb : src.getBBs()) {
+      for (auto &i : bb->instrs()) {
+        if (auto *call = dynamic_cast<const FnCall*>(&i)) {
+          if (call->getFnName() == "#sideeffect") {
+            to_remove.emplace_back(const_cast<Instr*>(&i));
+          }
+        }
+      }
+      for (auto &i : to_remove) {
+        bb->delInstr(i);
+      }
+      to_remove.clear();
+    }
+  }
 
   remove_unreachable_bbs(src);
   remove_unreachable_bbs(tgt);
@@ -1653,7 +1702,7 @@ void Transform::preprocess() {
 
   // infer alignment of memory operations
   unordered_map<const Value*, uint64_t> aligns;
-  unordered_set<const Value*> worklist;
+  queue<const Value*> worklist;
   for (auto fn : { &src, &tgt }) {
     for (auto &in0 : fn->getInputs()) {
       auto *in = dynamic_cast<const Input*>(&in0);
@@ -1673,11 +1722,10 @@ void Transform::preprocess() {
     auto users = fn->getUsers();
 
     do {
-      auto I = worklist.begin();
-      auto *i = *I;
-      worklist.erase(I);
+      auto *i = worklist.front();
+      worklist.pop();
 
-      uint64_t align = 0;
+      uint64_t align = 1;
       if (auto *alloc = dynamic_cast<const Alloc*>(i)) {
         align = alloc->getAlign();
       } else if (auto *call = dynamic_cast<const FnCall*>(i)) {
@@ -1707,15 +1755,18 @@ void Transform::preprocess() {
       } else if (auto *phi = dynamic_cast<const Phi*>(i)) {
         // optimistic handling of phis: unreachable predecessors don't
         // contribute to the result. This is revisited once they become reach
+        align = 0;
         for (auto &[val, bb] : phi->getValues()) {
           if (auto phi_align = aligns[val])
             align = align ? min(align, phi_align) : phi_align;
         }
-      } else {
+      } else if (!i->getType().isPtrType()) {
         continue;
       }
-      if (align != aligns[i]) {
-        aligns[i] = align;
+
+      auto &old_align = aligns[i];
+      if (align != old_align) {
+        old_align = align;
         for (auto [user, BB] : users[i]) {
           worklist.emplace(user);
         }

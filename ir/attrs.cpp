@@ -42,6 +42,8 @@ ostream& operator<<(ostream &os, const ParamAttrs &attr) {
     os << "zeroext ";
   if (attr.has(ParamAttrs::SignExt))
     os << "signext ";
+  if (attr.has(ParamAttrs::InReg))
+    os << "inreg ";
   if (attr.has(ParamAttrs::AllocPtr))
     os << "allocptr ";
   if (attr.has(ParamAttrs::AllocAlign))
@@ -159,6 +161,10 @@ bool MemoryAccess::canOnlyWrite(AccessType ty) const {
       return false;
   }
   return canWrite(ty);
+}
+
+bool MemoryAccess::canAccessAnything() const {
+  return canReadAnything() && canWriteAnything();
 }
 
 bool MemoryAccess::canReadAnything() const {
@@ -295,6 +301,15 @@ bool ParamAttrs::refinedBy(const ParamAttrs &other) const {
   if ((bits & other_params) != other_params)
     return false;
 
+  // check attributes that cannot change
+  attrs =
+    SignExt |
+    ZeroExt |
+    InReg
+  ;
+  if ((bits & attrs) != (other.bits & attrs))
+    return false;
+
   return derefBytes == other.derefBytes &&
          derefOrNullBytes == other.derefOrNullBytes &&
          blockSize == other.blockSize &&
@@ -324,15 +339,10 @@ void ParamAttrs::merge(const ParamAttrs &other) {
   align            = max(align, other.align);
 }
 
-static expr merge(pair<AndExpr, expr> e) {
-  e.first.add(std::move(e.second));
-  return std::move(e.first)();
-}
-
 static expr
 encodePtrAttrs(State &s, const expr &ptrvalue, uint64_t derefBytes,
                uint64_t derefOrNullBytes, uint64_t align, bool nonnull,
-               bool nocapture, const expr &deref_expr, Value *allocalign) {
+               bool nocapture, const expr &allocsize, Value *allocalign) {
   auto &m = s.getMemory();
   Pointer p(m, ptrvalue);
   expr non_poison(true);
@@ -342,7 +352,7 @@ encodePtrAttrs(State &s, const expr &ptrvalue, uint64_t derefBytes,
 
   non_poison &= p.isNocapture().implies(nocapture);
 
-  if (derefBytes || derefOrNullBytes || deref_expr.isValid()) {
+  if (derefBytes || derefOrNullBytes || allocsize.isValid()) {
     // dereferenceable, byval (ParamAttrs), dereferenceable_or_null
     if (derefBytes)
       s.addUB(merge(Pointer(m, ptrvalue)
@@ -351,17 +361,23 @@ encodePtrAttrs(State &s, const expr &ptrvalue, uint64_t derefBytes,
       s.addUB(p.isNull() ||
               merge(Pointer(m, ptrvalue)
                       .isDereferenceable(derefOrNullBytes, align, false,true)));
-    if (deref_expr.isValid())
+    if (allocsize.isValid())
       s.addUB(p.isNull() ||
               merge(Pointer(m, ptrvalue)
-                      .isDereferenceable(deref_expr, align, false, true)));
+                      .isDereferenceable(allocsize, align, false, true)));
   } else if (align != 1)
     non_poison &= Pointer(m, ptrvalue).isAligned(align);
 
   if (allocalign) {
+    Pointer p(m, ptrvalue);
     auto &align = s[*allocalign];
+    auto bw = max(align.bits(), allocsize.bits());
     non_poison &= align.non_poison;
-    non_poison &= Pointer(m, ptrvalue).isAligned(align.value);
+    // pointer must be null if alignment is not a power of 2
+    // or size is not a multiple of alignment
+    non_poison &= p.isNull() ||
+      (p.isAligned(align.value) &&
+       allocsize.zextOrTrunc(bw).urem(align.value.zextOrTrunc(bw)) == 0);
   }
   return non_poison;
 }

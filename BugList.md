@@ -88,6 +88,18 @@ Please contact us or submit a PR if something is missing or inaccurate.
 81. InstCombine introduces UB when moving rem instructions (https://llvm.org/PR60906)
 82. SimpleLoopUnswitch reverses branch condition incorrectly (https://llvm.org/PR63962)
 83. Vectorization of loop reduction introduces an aligned store incorrectly (https://llvm.org/PR65212)
+84. InstCombine: incorrect sink of FP math through select changes NaN payload (https://llvm.org/PR74297)
+85. InstCombine: fold of shuffle into fadd changes NaN payload (https://llvm.org/PR74326)
+86. Attributor & Function-attrs mark function as noundef incorrectly due to return value not in range (https://llvm.org/PR88026)
+87. InstCombine: incorrect vector fshr->shl transformation (https://llvm.org/PR89338)
+88. VectorCombine: shufflevector reorder leads to srem by poison (https://llvm.org/PR89390)
+89. InstCombine: incorrect srem rewrite (https://llvm.org/PR89516)
+90. InstCombine: incorrect swap of select vector operands (https://llvm.org/89669)
+91. SimplifyCFG: coallesced store retains the wrong alignment (https://llvm.org/PR89672)
+92. LoopVectorize introduces division by zero (https://llvm.org/PR89958)
+93. InstCombine: align attribute doesn't dereferenceability (https://llvm.org/PR90446)
+94. Reassociate: invalid propagation of overflow attributes at low bit-width (https://llvm.org/PR91417)
+95. InstCombine: removes a select, making the code more poisonous (https://llvm.org/PR91691)
 
 
 ### Bugs found in Z3
@@ -110,3 +122,7 @@ Please contact us or submit a PR if something is missing or inaccurate.
 17. Crash with FP<->BV conversions (https://github.com/Z3Prover/z3/issues/6460)
 18. Integer overflow (https://github.com/Z3Prover/z3/commit/a96f5a9b425b6f5ba7e8ce1c1a75db6683c4bdc9)
 19. Memory leak with arrays on timeout (https://github.com/Z3Prover/z3/commit/dda0c8ff4200faa6a441855716b47ec7f93e026e)
+20. Unsoundness in elim-uncnstr2 (https://github.com/Z3Prover/z3/issues/6488)
+21. Unsoundness in elim-uncnstr2 (https://github.com/Z3Prover/z3/issues/6506)
+22. Unsound NaN encoding (https://github.com/Z3Prover/z3/issues/6972)
+23. fp.roundToIntegral gives invalid zero_extend application (https://github.com/Z3Prover/z3/issues/7056)

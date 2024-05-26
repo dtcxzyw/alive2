@@ -61,9 +61,14 @@ public:
   smt::expr ptrValue() const;
   smt::expr ptrByteoffset() const;
   smt::expr nonptrNonpoison() const;
+  smt::expr boolNonptrNonpoison() const;
   smt::expr nonptrValue() const;
   smt::expr isPoison() const;
+  smt::expr nonPoison() const;
   smt::expr isZero() const; // zero or null
+
+  smt::expr castPtrToInt() const;
+  smt::expr forceCastToInt() const;
 
   smt::expr&& operator()() && { return std::move(p); }
 
@@ -165,6 +170,7 @@ class Memory {
 
   smt::expr isBlockAlive(const smt::expr &bid, bool local) const;
 
+  void mkNonPoisonAxioms(bool local);
   void mkNonlocalValAxioms(bool skip_consts);
 
   bool mayalias(bool local, unsigned bid, const smt::expr &offset,
@@ -173,9 +179,9 @@ class Memory {
   AliasSet computeAliasing(const Pointer &ptr, unsigned bytes, uint64_t align,
                            bool write) const;
 
-  template <typename Fn>
   void access(const Pointer &ptr, unsigned btyes, uint64_t align, bool write,
-              Fn &fn);
+              const std::function<void(MemBlock&, unsigned, bool,
+                                       smt::expr&&)> &fn);
 
   std::vector<Byte> load(const Pointer &ptr, unsigned bytes,
                          std::set<smt::expr> &undef, uint64_t align,
@@ -235,6 +241,7 @@ public:
   Memory& operator=(Memory&&) = default;
 
   Memory dup() const { return *this; }
+  Memory dupNoRead() const;
 
   void mkAxioms(const Memory &other) const;
 
@@ -243,7 +250,7 @@ public:
 
   void markByVal(unsigned bid, bool is_const);
   smt::expr mkInput(const char *name, const ParamAttrs &attrs);
-  std::pair<smt::expr, smt::expr> mkUndefInput(const ParamAttrs &attrs) const;
+  std::pair<smt::expr, smt::expr> mkUndefInput(const ParamAttrs &attrs);
 
   struct PtrInput {
     unsigned idx;
@@ -349,12 +356,17 @@ public:
     AliasSet::printStats(os);
   }
 
+  bool isAsmMode() const;
   State& getState() const { return *state; }
 
   void print(std::ostream &os, const smt::Model &m) const;
   friend std::ostream& operator<<(std::ostream &os, const Memory &m);
 
   friend class Pointer;
+
+private:
+  void print_array(std::ostream &os, const smt::expr &a,
+                   unsigned indent = 0) const;
 };
 
 }

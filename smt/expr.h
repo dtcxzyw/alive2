@@ -88,7 +88,7 @@ public:
   static expr mkNaN(const expr &type);
   static expr mkNumber(const char *n, const expr &type);
   static expr mkVar(const char *name, const expr &type);
-  static expr mkVar(const char *name, unsigned bits);
+  static expr mkVar(const char *name, unsigned bits, bool fresh = false);
   static expr mkBoolVar(const char *name);
   static expr mkHalfVar(const char *name);
   static expr mkBFloatVar(const char *name);
@@ -143,6 +143,8 @@ public:
   bool isConstArray(expr &val) const;
   bool isStore(expr &array, expr &idx, expr &val) const;
   bool isLoad(expr &array, expr &idx) const;
+  bool isLambda(expr &body) const;
+  expr lambdaIdxType() const;
 
   bool isFPAdd(expr &rounding, expr &lhs, expr &rhs) const;
   bool isFPSub(expr &rounding, expr &lhs, expr &rhs) const;
@@ -215,6 +217,8 @@ public:
   expr smax(const expr &rhs) const;
 
   expr abs() const;
+
+  expr round_up(const expr &power_of_two) const;
 
   expr isNaN() const;
   expr isInf() const;
@@ -337,7 +341,7 @@ public:
   static expr mkConstArray(const expr &domain, const expr &value);
 
   expr store(const expr &idx, const expr &val) const;
-  expr load(const expr &idx) const;
+  expr load(const expr &idx, uint64_t max_idx = UINT64_MAX) const;
 
   static expr mkIf(const expr &cond, const expr &then, const expr &els);
   static expr mkForAll(const std::set<expr> &vars, expr &&val);

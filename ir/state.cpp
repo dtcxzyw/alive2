@@ -7,6 +7,7 @@
 #include "smt/smt.h"
 #include "util/config.h"
 #include "util/errors.h"
+#include <algorithm>
 #include <cassert>
 
 using namespace smt;
@@ -625,6 +626,10 @@ bool State::isUndef(const expr &e) const {
   return undef_vars.count(e) != 0;
 }
 
+bool State::isAsmMode() const {
+  return getFn().has(FnAttrs::Asm);
+}
+
 void State::cleanup(const Value &val) {
   values.erase(&val);
   seen_bbs.clear();
@@ -976,7 +981,7 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
   }
 
   auto isgvar = [&](const auto &decl) {
-    if (auto gv = getFn().getConstant(string_view(decl.name).substr(1)))
+    if (auto gv = getFn().getGlobalVar(string_view(decl.name).substr(1)))
       return Pointer::mkPointerFromNoAttrs(memory, fn_ptr).getAddress() ==
              Pointer(memory, (*this)[*gv].value).getAddress();
     return expr();
@@ -1014,7 +1019,7 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
     auto call_data_pair
       = calls_fn.try_emplace(
           { std::move(inputs), std::move(ptr_inputs), std::move(call_ranges),
-            attrs.mem.canReadSomething() ? memory.dup() : Memory(*this),
+            attrs.mem.canReadSomething() ? memory.dup() : memory.dupNoRead(),
             attrs.mem, noret, willret });
     auto &I = call_data_pair.first;
     bool inserted = call_data_pair.second;
@@ -1123,6 +1128,10 @@ State::addFnCall(const string &name, vector<StateValue> &&inputs,
       addUB(std::move(d.ub));
       addNoReturn(std::move(d.noreturns));
 
+      // functions never return poison in assembly
+      if (isAsmMode())
+        d.retval.setNotPoison();
+
       if (noalias) {
         // no alias functions in tgt must allocate a local block on each call
         // bid may be different from that of src
@@ -1195,8 +1204,9 @@ void State::addUndefVar(expr &&var) {
   undef_vars.emplace(std::move(var));
 }
 
-void State::resetUndefVars() {
-  quantified_vars.insert(undef_vars.begin(), undef_vars.end());
+void State::resetUndefVars(bool quantify) {
+  ((isSource() || !quantify) ? quantified_vars : fn_call_qvars)
+    .insert(undef_vars.begin(), undef_vars.end());
   undef_vars.clear();
 }
 
@@ -1224,21 +1234,20 @@ void State::finishInitializer() {
 }
 
 void State::saveReturnedInput() {
-  assert(isSource());
   if (auto *ret = getFn().getReturnedInput()) {
     returned_input = (*this)[*ret];
-    resetUndefVars();
+    resetUndefVars(true);
   }
 }
 
-expr State::sinkDomain() const {
+expr State::sinkDomain(bool include_ub) const {
   auto I = predecessor_data.find(&f.getSinkBB());
   if (I == predecessor_data.end())
     return false;
 
   OrExpr ret;
   for (auto &[src, data] : I->second) {
-    ret.add(data.path());
+    ret.add(data.path() && (include_ub ? *data.UB() : true));
   }
   return ret();
 }
@@ -1293,8 +1302,6 @@ void State::syncSEdataWithSrc(State &src) {
   for (auto &itm : glbvar_bids)
     itm.second.second = false;
 
-  returned_input = src.returned_input;
-
   fn_call_data = std::move(src.fn_call_data);
   inaccessiblemem_bids = std::move(src.inaccessiblemem_bids);
   memory.syncWithSrc(src.returnMemory());
@@ -1306,7 +1313,7 @@ void State::mkAxioms(State &tgt) {
 
   if (has_indirect_fncalls) {
     for (auto &decl : f.getFnDecls()) {
-      if (auto gv = f.getConstant(string_view(decl.name).substr(1)))
+      if (auto gv = f.getGlobalVar(string_view(decl.name).substr(1)))
         addAxiom(
           expr::mkUF("#fndeclty",
                      { Pointer(memory, (*this)[*gv].value).reprWithoutAttrs() },

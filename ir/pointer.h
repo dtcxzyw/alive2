@@ -46,6 +46,10 @@ public:
   Pointer(const Memory &m, const smt::expr &bid, const smt::expr &offset,
           const ParamAttrs &attr = {});
 
+  Pointer(const Pointer &other) noexcept = default;
+  Pointer(Pointer &&other) noexcept = default;
+  void operator=(Pointer &&rhs) noexcept { p = std::move(rhs.p); }
+
   static smt::expr mkLongBid(const smt::expr &short_bid, bool local);
   static smt::expr mkUndef(State &s);
 
@@ -98,10 +102,12 @@ public:
   smt::expr isAligned(const smt::expr &align);
   std::pair<smt::AndExpr, smt::expr>
   isDereferenceable(uint64_t bytes, uint64_t align, bool iswrite = false,
-                    bool ignore_accessability = false);
+                    bool ignore_accessability = false,
+                    bool round_size_to_align = true);
   std::pair<smt::AndExpr, smt::expr>
   isDereferenceable(const smt::expr &bytes, uint64_t align, bool iswrite,
-                    bool ignore_accessability = false);
+                    bool ignore_accessability = false,
+                    bool round_size_to_align = true);
 
   void isDisjointOrEqual(const smt::expr &len1, const Pointer &ptr2,
                          const smt::expr &len2) const;
@@ -116,11 +122,15 @@ public:
     CXX_NEW,
   };
   smt::expr getAllocType() const;
-  smt::expr isStackAllocated() const;
+  smt::expr isStackAllocated(bool simplify = true) const;
   smt::expr isHeapAllocated() const;
   smt::expr isNocapture(bool simplify = true) const;
   smt::expr isNoRead() const;
   smt::expr isNoWrite() const;
+  smt::expr isBasedOnArg() const;
+
+  Pointer setAttrs(const ParamAttrs &attr) const;
+  Pointer setIsBasedOnArg() const;
 
   smt::expr refined(const Pointer &other) const;
   smt::expr fninputRefined(const Pointer &other, std::set<smt::expr> &undef,
@@ -131,7 +141,8 @@ public:
   static Pointer mkNullPointer(const Memory &m);
   smt::expr isNull() const;
 
-  static void resetGlobals();
+  static Pointer mkIf(const smt::expr &cond, const Pointer &then,
+                      const Pointer &els);
 
   auto operator<=>(const Pointer &rhs) const { return p <=> rhs.p; }
 

@@ -40,9 +40,9 @@ llvm::cl::opt<bool> opt_disable_poison(LLVM_ARGS_PREFIX "disable-poison-input",
   llvm::cl::desc("Assume inputs are not poison (default=false)"),
   llvm::cl::init(false), llvm::cl::cat(alive_cmdargs));
 
-llvm::cl::opt<bool> opt_check_if_src_is_ub(
-  LLVM_ARGS_PREFIX "check-src-ub",
-  llvm::cl::desc("Check if source function is always UB (default=false)"),
+llvm::cl::opt<bool> opt_fail_if_src_is_ub(
+  LLVM_ARGS_PREFIX "fail-src-ub",
+  llvm::cl::desc("Fail if source function is always UB (default=false)"),
   llvm::cl::init(false), llvm::cl::cat(alive_cmdargs));
 
 llvm::cl::opt<bool> opt_tgt_is_asm(
@@ -59,7 +59,7 @@ llvm::cl::opt<bool> opt_se_verbose(LLVM_ARGS_PREFIX "se-verbose",
   llvm::cl::init(false), llvm::cl::cat(alive_cmdargs));
 
 llvm::cl::opt<unsigned> opt_smt_to(LLVM_ARGS_PREFIX "smt-to",
-  llvm::cl::desc("Timeout for SMT queries (default=10000)"),
+  llvm::cl::desc("Timeout for SMT queries in ms (default=10000)"),
   llvm::cl::init(10000), llvm::cl::value_desc("ms"),
   llvm::cl::cat(alive_cmdargs));
 
