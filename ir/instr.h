@@ -34,7 +34,8 @@ public:
             SAdd_Sat, UAdd_Sat, SSub_Sat, USub_Sat, SShl_Sat, UShl_Sat,
             SAdd_Overflow, UAdd_Overflow, SSub_Overflow, USub_Overflow,
             SMul_Overflow, UMul_Overflow,
-            And, Or, Xor, Cttz, Ctlz, UMin, UMax, SMin, SMax, Abs };
+            And, Or, Xor, Cttz, Ctlz, UMin, UMax, SMin, SMax, Abs,
+            UCmp, SCmp };
   enum Flags { None = 0, NSW = 1 << 0, NUW = 1 << 1, Exact = 1 << 2, Disjoint = 1 << 3 };
 
 private:
@@ -631,10 +632,12 @@ private:
   Value *val;
   std::vector<Value*> args;
   Kind kind;
+  bool is_welldefined;
 
 public:
   AssumeVal(Type &type, std::string &&name, Value &val,
-            std::vector<Value *> &&args, Kind kind);
+            std::vector<Value *> &&args, Kind kind,
+            bool is_welldefined = false);
 
   std::vector<Value*> operands() const override;
   bool propagatesPoison() const override;
@@ -678,6 +681,8 @@ public:
     // If zero, this instruction does not read/write bytes.
     // Otherwise, bytes of a memory can be widened to this size.
     unsigned byteSize = 0;
+
+    unsigned subByteAccess = 0;
 
     bool doesMemAccess() const { return byteSize; }
 
@@ -768,14 +773,22 @@ class GEP final : public MemInstr {
   Value *ptr;
   std::vector<std::pair<uint64_t, Value*>> idxs;
   bool inbounds;
+  bool nusw;
+  bool nuw;
 public:
-  GEP(Type &type, std::string &&name, Value &ptr, bool inbounds)
-    : MemInstr(type, std::move(name)), ptr(&ptr), inbounds(inbounds) {}
+  GEP(Type &type, std::string &&name, Value &ptr, bool inbounds, bool nusw,
+      bool nuw)
+    : MemInstr(type, std::move(name)), ptr(&ptr), inbounds(inbounds),
+      nusw(nusw), nuw(nuw) {
+    nusw |= inbounds;
+  }
 
   void addIdx(uint64_t obj_size, Value &idx);
   Value& getPtr() const { return *ptr; }
   auto& getIdxs() const { return idxs; }
   bool isInBounds() const { return inbounds; }
+  bool hasNoUnsignedSignedWrap() const { return nusw; }
+  bool hasNoUnsignedWrap() const { return nuw; }
 
   std::pair<uint64_t, uint64_t> getMaxAllocSize() const override;
   uint64_t getMaxAccessSize() const override;

@@ -610,7 +610,9 @@ public:
     if (!ty || !ptr)
       return error(i);
 
-    auto gep = make_unique<GEP>(*ty, value_name(i), *ptr, i.isInBounds());
+    auto gep =
+        make_unique<GEP>(*ty, value_name(i), *ptr, i.isInBounds(),
+                         i.hasNoUnsignedSignedWrap(), i.hasNoUnsignedWrap());
     auto gep_struct_ofs = [&i, this](llvm::StructType *sty, llvm::Value *ofs) {
       llvm::Value *vals[] = { llvm::ConstantInt::getFalse(i.getContext()), ofs };
       return this->DL().getIndexedOffsetInType(sty, { vals, 2 });
@@ -854,7 +856,7 @@ public:
             auto gep = make_unique<GEP>(
                 aptr->getType(),
                 "#align_adjustedptr" + to_string(alignopbundle_idx++),
-                *aptr, false);
+                *aptr, false, false, false);
             gep->addIdx(-1ull, *get_operand(bundle.Inputs[2].get()));
 
             aptr = gep.get();
@@ -896,7 +898,8 @@ public:
     case llvm::Intrinsic::smin:
     case llvm::Intrinsic::smax:
     case llvm::Intrinsic::abs:
-    {
+    case llvm::Intrinsic::ucmp:
+    case llvm::Intrinsic::scmp: {
       PARSE_BINOP();
       BinOp::Op op;
       switch (i.getIntrinsicID()) {
@@ -919,6 +922,8 @@ public:
       case llvm::Intrinsic::smin:     op = BinOp::SMin; break;
       case llvm::Intrinsic::smax:     op = BinOp::SMax; break;
       case llvm::Intrinsic::abs:      op = BinOp::Abs; break;
+      case llvm::Intrinsic::ucmp:     op = BinOp::UCmp; break;
+      case llvm::Intrinsic::scmp:     op = BinOp::SCmp; break;
       default: UNREACHABLE();
       }
       FnAttrs attrs;
@@ -1349,17 +1354,20 @@ public:
   }
 
   unique_ptr<Instr>
-  handleRangeAttrNoInsert(const llvm::Attribute &attr, Value &val) {
+  handleRangeAttrNoInsert(const llvm::Attribute &attr, Value &val,
+                          bool is_welldefined = false) {
     auto CR = attr.getValueAsConstantRange();
     vector<Value*> bounds{ make_intconst(CR.getLower()),
                            make_intconst(CR.getUpper()) };
     return
       make_unique<AssumeVal>(val.getType(), "%#range_" + val.getName(), val,
-                             std::move(bounds), AssumeVal::Range);
+                             std::move(bounds), AssumeVal::Range,
+                             is_welldefined);
   }
 
-  Value* handleRangeAttr(const llvm::Attribute &attr, Value &val) {
-    auto assume = handleRangeAttrNoInsert(attr, val);
+  Value* handleRangeAttr(const llvm::Attribute &attr, Value &val,
+                         bool is_welldefined = false) {
+    auto assume = handleRangeAttrNoInsert(attr, val, is_welldefined);
     auto ret = assume.get();
     BB->addInstr(std::move(assume));
     return ret;
@@ -1431,6 +1439,10 @@ public:
                                      llvmattr.getDereferenceableOrNullBytes());
         break;
 
+      case llvm::Attribute::Writable:
+        attrs.set(ParamAttrs::Writable);
+        break;
+
       case llvm::Attribute::Alignment:
         attrs.set(ParamAttrs::Align);
         attrs.align = max(attrs.align, llvmattr.getAlignment()->value());
@@ -1441,7 +1453,8 @@ public:
         break;
 
       case llvm::Attribute::Range:
-        newval = handleRangeAttr(llvmattr, val);
+        newval = handleRangeAttr(llvmattr, val,
+                                 aset.hasAttribute(llvm::Attribute::NoUndef));
         break;
 
       case llvm::Attribute::NoFPClass:
@@ -1459,6 +1472,10 @@ public:
 
       case llvm::Attribute::AllocAlign:
         attrs.set(ParamAttrs::AllocAlign);
+        break;
+
+      case llvm::Attribute::DeadOnUnwind:
+        attrs.set(ParamAttrs::DeadOnUnwind);
         break;
 
       default:
